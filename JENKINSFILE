@@ -1,56 +1,65 @@
 pipeline {
     agent any
-
-     stages {
+    stages {
         stage('Get Code') {
             steps {
-                // Obtener código del repo
-                git 'https://github.com/anieto-unir/helloworld.git'
+                // Clonamos repositorio
+                git "https://github.com/anieto-unir/helloworld.git"
             }
         }
-
-    stage('Build') {
-        steps {
-            echo 'Eyyyy, esto es Python. No hay que compilar nada!!!'
-	    echo WORKSPACE
-	    bat 'dir'
+        stage('Setup environmet') {
+            steps {
+                sh "ls -l"
+                sh '''
+                    python3 -m venv unir-env
+                    echo "cant run source ./unir-env/bin/activate because not bash"
+                    ./unir-env/bin/pip install flask pytest
+                '''
+            }
         }
-    }
-
-    stage('Tests')
-    {
-        parallel {
-
-            stage('Unit') {
-                steps {
-                    catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
-                        bat '''
-                                set PYTHONPATH=%WORKSPACE%
-                                pytest --junitxml=result-unit.xml test\\unit
-                        '''
+        stage('Testing') {
+            // Clase 9 minuto 45
+            parallel {
+                stage('Unit') {
+                    steps {
+                        // Añadir un catch para que pase a la siguiente etapa aunque falle (min 37 clase 9)
+                        catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                            sh '''
+                                export PYTHONPATH="$(pwd)"
+                                ./unir-env/bin/pytest --junitxml=results-unit.xml test/unit/
+                            '''
+                        }
+                    }
+                }
+                stage('Rest') {
+                    steps {
+                        catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                            // En la build 21 sospecho que falla por que el servidor no ha terminado de arrancar cuando comienzan las pruebas. Añado comprobacion while y curl.
+                            // Wiremock download url https://repo1.maven.org/maven2/org/wiremock/wiremock-standalone/3.13.2/wiremock-standalone-3.13.2.jar
+                            sh '''
+                            export FLASK_APP="$(pwd)/app/api.py"
+                            export PYTHONPATH="$(pwd)"
+                            
+                            # Lanzamos wiremock y esperamos a que devuelva respuestas
+                            nohup java -jar /var/local/bin/wiremock-standalone-3.13.2.jar --port 9090 --root-dir test/wiremock &
+                            while ! curl -s http://localhost:9090/calc/sqrt/64 ; do sleep 0.2; done
+                            
+                             # Lanzamos flask y esperamos a que devuelva respuestas
+                            nohup ./unir-env/bin/flask run &
+                            while ! curl -s http://localhost:5000 ; do sleep 0.2; done
+                            
+                            # Testing
+                            ./unir-env/bin/pytest --junitxml=results-rest.xml test/rest/
+                            '''
+                        }
                     }
                 }
             }
-            
-            stage('Rest') {
-                steps {
-                    bat '''
-                        set FLASK_APP=app\\api.py
-                        set FLASK_ENV=development
-                        start flask run
-                        start java -jar C:\\Unir\\Ejercicios\\wiremock\\wiremock-jre8-standalone-2.28.0.jar --port 9090 --root-dir test\\wiremock
-                        set PYTHONPATH=%WORKSPACE%
-                        pytest --junitxml=result-rest.xml test\\rest
-                    '''
-                }    
-            }    
+        }
+        stage('Results') {
+            steps {
+                junit 'results*.xml'
+            }
         }
     }
-    
-    stage ('Results') {
-        steps {
-            junit 'result*.xml'
-        }
-    }
-  }
 }

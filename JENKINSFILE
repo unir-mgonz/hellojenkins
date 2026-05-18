@@ -1,13 +1,14 @@
 pipeline {
-    //
     agent any
     stages {
         stage('Get Code') {
             steps {
                 // Clonamos repositorio
+                cleanWs()
                 git "https://github.com/anieto-unir/helloworld.git"
             }
         }
+        /*
         stage('Setup environmet') {
             steps {
                 sh "ls -l"
@@ -18,6 +19,7 @@ pipeline {
                 '''
             }
         }
+        */
         stage('Testing') {
             // Clase 9 minuto 45
             parallel {
@@ -27,9 +29,15 @@ pipeline {
                         catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
                             sh '''
                                 export PYTHONPATH="$(pwd)"
-                                ./unir-env/bin/pytest --junitxml=results-unit.xml test/unit/
+                                python3 -m coverage run --parallel-mode --source=app -m pytest test/unit/ --junitxml=results-unit.xml
+                                python3 -m coverage combine
+                                python3 -m coverage xml -o results-coverage.xml
+                                #python3 -m pytest --junitxml=results-unit.xml test/unit/
+                                #python3 -m coverage xml -o results-coverage.xml
                             '''
                         }
+                        // Guardamos resultados de coverage para futura etapa, ya que no se deben ejecutar unit tests mas de una vez
+                        stash includes: 'results-coverage.xml', name: 'results-coverage'
                     }
                 }
                 stage('Rest') {
@@ -46,17 +54,76 @@ pipeline {
                             while ! curl -s http://localhost:9090/calc/sqrt/64 ; do sleep 0.2; done
                             
                              # Lanzamos flask y esperamos a que devuelva respuestas
-                            nohup ./unir-env/bin/flask run &
+                            python3 -m flask run &
                             while ! curl -s http://localhost:5000 ; do sleep 0.2; done
                             
                             # Testing
-                            ./unir-env/bin/pytest --junitxml=results-rest.xml test/rest/
+                            python3 -m pytest --junitxml=results-rest.xml test/rest/
                             '''
                         }
                     }
                 }
+                stage('Static') {
+                    steps {
+                        catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                            sh'''
+                                python3 -m flake8 --exit-zero --format=pylint app > results-flake8.txt
+                            '''
+                        }
+                        recordIssues tools: [flake8(pattern: 'results-flake8.txt')], qualityGates:[[threshold: 8, type: 'TOTAL', unstable: true]], unhealthy: 10
+                    }
+                }
+                stage('Security') {
+                    steps {
+                        catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                            sh'''
+                                python3 -m bandit -r app/ -f xml -o results-bandit.xml
+                            '''
+                        }
+                        recordIssues tools: [pyLint(name:'Security', pattern: 'results-security.xml')], qualityGates:[[threshold: 2, type: 'TOTAL', unstable: true]], unhealthy: 4 
+                    }
+                }
+                stage('Performance') {
+                    steps {
+                        catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                            sh'''
+                                export FLASK_APP="$(pwd)/app/api.py"
+                                export PYTHONPATH="$(pwd)"
+                                
+                                # Lanzamos wiremock y esperamos a que devuelva respuestas
+                                nohup java -jar /var/local/bin/wiremock-standalone-3.13.2.jar --port 9090 --root-dir test/wiremock &
+                                while ! curl -s http://localhost:9090/calc/sqrt/64 ; do sleep 0.2; done
+                                
+                                 # Lanzamos flask y esperamos a que devuelva respuestas
+                                python3 -m flask run &
+                                while ! curl -s http://localhost:5000 ; do sleep 0.2; done
+                                
+                                /var/local/bin/apache-jmeter-5.6.3/bin/jmeter -n -t test/jmeter/flask.jmx -l results-flask.jtl
+                            '''
+                        }
+                        perfReport( 
+                            sourceDataFiles: 'results-flask.jtl', 
+                            errorFailedThreshold: 5,
+                            errorUnstableThreshold: 1
+                        )
+                    }
+                }
             }
         }
+        stage('Coverage') {
+                    steps {
+                        unstash 'results-coverage'
+                        recordCoverage(
+                            tools: [[parser: 'COBERTURA', pattern: 'results-coverage.xml']],
+                            qualityGates: [
+                                // Line
+                                [metric: 'LINE', threshold: 85.0, criticality: 'ERROR'], [metric: 'LINE', threshold: 95.0],
+                                // Branch
+                                [metric: 'BRANCH', threshold: 80.0, criticality: 'ERROR'], [metric: 'BRANCH', threshold: 90.0]
+                            ]
+                        )
+                    }
+                }
         stage('Results') {
             steps {
                 junit 'results*.xml'
